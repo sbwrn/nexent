@@ -1,5 +1,6 @@
 import sys
 import os
+import types
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -7,13 +8,48 @@ from unittest.mock import patch, MagicMock, AsyncMock
 sys.path.insert(0, os.path.abspath(
     os.path.join(os.path.dirname(__file__), '../../..')))
 
+
+def _create_stub_module(name: str, **attrs):
+    """Register a lightweight module stub with the provided attributes."""
+    module = types.ModuleType(name)
+    for attr_name, attr_value in attrs.items():
+        setattr(module, attr_name, attr_value)
+    sys.modules[name] = module
+    return module
+
 # Mock the consts.const module before importing the image_service module
 mock_const = MagicMock()
 mock_const.DATA_PROCESS_SERVICE = "http://mock-data-process-service"
+mock_const.MODEL_CONFIG_MAPPING = {"vlm": "vlm_model_config"}
 sys.modules['consts.const'] = mock_const
 
+# Stub heavy dependency modules to avoid real client initialization
+backend_database_module = _create_stub_module("backend.database")
+database_module = _create_stub_module("database")
+client_stub = _create_stub_module(
+    "backend.database.client",
+    MinioClient=MagicMock(),
+    PostgresClient=MagicMock(),
+    db_client=MagicMock(),
+    get_db_session=MagicMock(),
+    as_dict=MagicMock(),
+    minio_client=MagicMock(),
+    postgres_client=MagicMock(),
+)
+sys.modules['database.client'] = client_stub
+
+_create_stub_module(
+    "utils.config_utils",
+    tenant_config_manager=MagicMock(),
+    get_model_name_from_config=MagicMock(return_value=""),
+)
+
+nexent_module = _create_stub_module("nexent", MessageObserver=MagicMock())
+_create_stub_module("nexent.core")
+_create_stub_module("nexent.core.models", OpenAIVLModel=MagicMock())
+
 # Now import the module after mocking dependencies
-from services.image_service import proxy_image_impl
+from services.image_service import proxy_image_impl, get_vlm_model
 
 # Sample test data
 test_url = "https://example.com/image.jpg"
@@ -300,3 +336,66 @@ async def test_proxy_image_impl_url_encoding():
         called_url = mock_session.get.call_args[0][0]
         assert "http://mock-data-process-service/tasks/load_image" in called_url
         assert f"url={encoded_url}" in called_url
+
+
+@patch('services.image_service.OpenAIVLModel')
+@patch('services.image_service.MessageObserver')
+@patch('services.image_service.get_model_name_from_config')
+@patch('services.image_service.tenant_config_manager')
+def test_get_vlm_model_success(mock_tenant_config_manager, mock_get_model_name, mock_message_observer, mock_openai_vl_model):
+    """Ensure get_vlm_model builds OpenAIVLModel with tenant config."""
+    mock_config = {
+        "base_url": "https://mock-api",
+        "api_key": "secret",
+        "model_name": "gpt-4v"
+    }
+    mock_tenant_config_manager.get_model_config.return_value = mock_config
+    mock_get_model_name.return_value = "gpt-4v"
+    mock_model_instance = MagicMock()
+    mock_openai_vl_model.return_value = mock_model_instance
+
+    result = get_vlm_model("tenant-1")
+
+    mock_tenant_config_manager.get_model_config.assert_called_once_with(
+        key=mock_const.MODEL_CONFIG_MAPPING["vlm"],
+        tenant_id="tenant-1"
+    )
+    mock_message_observer.assert_called_once_with()
+    mock_openai_vl_model.assert_called_once_with(
+        observer=mock_message_observer.return_value,
+        model_id="gpt-4v",
+        api_base="https://mock-api",
+        api_key="secret",
+        temperature=0.7,
+        top_p=0.7,
+        frequency_penalty=0.5,
+        max_tokens=512
+    )
+    assert result == mock_model_instance
+
+
+@patch('services.image_service.OpenAIVLModel')
+@patch('services.image_service.MessageObserver')
+@patch('services.image_service.get_model_name_from_config')
+@patch('services.image_service.tenant_config_manager')
+def test_get_vlm_model_with_empty_config(mock_tenant_config_manager, mock_get_model_name, mock_message_observer, mock_openai_vl_model):
+    """Fallback to empty values when tenant config is empty."""
+    mock_tenant_config_manager.get_model_config.return_value = {}
+    mock_model_instance = MagicMock()
+    mock_openai_vl_model.return_value = mock_model_instance
+
+    result = get_vlm_model("tenant-2")
+
+    # get_model_name_from_config should not be called because config is falsy
+    mock_get_model_name.assert_not_called()
+    mock_openai_vl_model.assert_called_once_with(
+        observer=mock_message_observer.return_value,
+        model_id="",
+        api_base="",
+        api_key="",
+        temperature=0.7,
+        top_p=0.7,
+        frequency_penalty=0.5,
+        max_tokens=512
+    )
+    assert result == mock_model_instance
