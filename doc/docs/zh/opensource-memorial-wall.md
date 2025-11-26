@@ -490,6 +490,10 @@ Nexent越来越好！
 
 ::: info aurorahashcat - 2025-11-23
 nexent看起来超棒的自动化智能体构建平台，祝越来越好😀
+
+::: info user -2025-11-26
+第一次试用智能化搭建，祝越来越好！
+:::
 :::
 
 ::: williamllk from SJTU - 2025-11-23
